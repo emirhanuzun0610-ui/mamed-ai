@@ -1,0 +1,1 @@
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/mamed-ai/sw.js', { scope: '/mamed-ai/' })})}
