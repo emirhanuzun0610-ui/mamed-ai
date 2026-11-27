@@ -25,7 +25,8 @@ jobs:
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
         run: |
-          npm ci
+          npm install --global "$(node -p 'require("./package.json").packageManager')"
+          npm ci --ignore-scripts
           npx vite build --outDir dist
       - uses: actions/upload-pages-artifact@v3
         with:
