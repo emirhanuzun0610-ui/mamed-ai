@@ -483,8 +483,10 @@ def create_app(
     app.include_router(research_router)
     app.include_router(analytics_router)
     from openjarvis.server.mamed_modes import mamed_router
+    from openjarvis.server.school_mail_routes import school_mail_router
 
     app.include_router(mamed_router)
+    app.include_router(school_mail_router)
     include_all_routes(app)
 
     # Restore SendBlue channel bindings from database on startup

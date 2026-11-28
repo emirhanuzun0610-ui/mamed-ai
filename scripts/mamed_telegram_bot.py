@@ -19,6 +19,9 @@ logging.basicConfig(
 logger = logging.getLogger("mamed.telegram")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+_SRC_DIR = _REPO_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
 load_dotenv(_REPO_ROOT / "api_keys.env")
 
 _VOICE_REPLIES_BY_CHAT: dict[int, bool] = {}
@@ -31,7 +34,11 @@ def _api_token() -> str:
     )
 
 
-def _auth_headers() -> dict[str, str]:
+def _auth_headers(target_kind: str = "yerel") -> dict[str, str]:
+    if target_kind == "bulut":
+        cloud_tok = os.environ.get("MAMED_CLOUD_API_KEY", "").strip()
+        if cloud_tok:
+            return {"Authorization": f"Bearer {cloud_tok}"}
     tok = _api_token()
     return {"Authorization": f"Bearer {tok}"} if tok else {}
 
@@ -76,6 +83,56 @@ def _mode_label(mode_id: str) -> str:
     }.get(mode_id, mode_id)
 
 
+def format_school_mail_status_text(info: dict) -> str:
+    """Okul mail dinleyici durumunu Telegram mesaji olarak bicimlendirir."""
+    running = bool(info.get("watcher_running"))
+    status = str(info.get("status") or "-")
+    conn = str(info.get("connection_type") or "-")
+    conn_label = {
+        "imap_idle": "IMAP IDLE (Anlık)",
+        "imap_poll_15s": "IMAP 15sn Yoklama",
+        "bagli_degil": "Bağlı Değil",
+    }.get(conn, conn)
+    last_check = info.get("last_check_at") or "Henüz kontrol edilmedi"
+    prof_total = int(info.get("total_professor_mails") or 0)
+    filtered_total = int(info.get("filtered_announcements_count") or 0)
+    lines = [
+        "Mamed Okul E-posta Durumu",
+        f"Dinleyici: {'Çalışıyor' if running else 'Kapalı'} ({status})",
+        f"Bağlantı: {conn_label} ({info.get('imap_host') or '-'}:{info.get('imap_port') or 993})",
+        f"Hesap: {info.get('username') or 'Ayarlı değil'}",
+        f"Son Kontrol: {last_check}",
+        f"Yakalanan Hoca Maili: {prof_total} | Filtrelenen Duyuru: {filtered_total}",
+    ]
+    if info.get("last_error"):
+        lines.append(f"Son Hata: {info['last_error']}")
+    recent = info.get("recent_professor_mails") or []
+    if recent:
+        lines.append("\nSon Hoca Mailleri:")
+        for idx, item in enumerate(recent[:3], start=1):
+            notif = item.get("formatted_notification") or item.get("summary") or item.get("subject") or "-"
+            lines.append(f"{idx}. {notif}")
+    return "\n".join(lines)[:4000]
+
+
+def format_school_mail_check_text(result: dict) -> str:
+    """Anlik okul mail kontrol sonucunu Telegram mesaji olarak bicimlendirir."""
+    if result.get("baseline_initialized"):
+        return (
+            "Mamed okul posta kutusu ilk kez taban olarak işaretlendi "
+            f"(Son UID: {result.get('last_uid', 0)}). Bundan sonraki yeni hoca mailleri anında bildirilecek."
+        )
+    checked = int(result.get("checked_count") or 0)
+    prof = int(result.get("professor_count") or 0)
+    filtered = int(result.get("filtered_count") or 0)
+    if checked == 0:
+        return "Yeni okul e-postası bulunmuyor."
+    return (
+        f"Okul posta kutusu kontrol edildi: {checked} yeni e-posta incelendi "
+        f"({prof} hoca maili, {filtered} duyuru/sistem filtrelendi)."
+    )
+
+
 async def _ask_mamed(text: str, *, mode: Optional[str] = None) -> tuple[str, str, str]:
     base_url, target_kind = select_backend_url()
     payload: dict = {
@@ -89,7 +146,7 @@ async def _ask_mamed(text: str, *, mode: Optional[str] = None) -> tuple[str, str
     async with httpx.AsyncClient(timeout=90.0) as client:
         resp = await client.post(
             f"{base_url}/v1/chat/completions",
-            headers=_auth_headers(),
+            headers=_auth_headers(target_kind),
             json=payload,
         )
         if resp.status_code == 401:
@@ -102,12 +159,12 @@ async def _ask_mamed(text: str, *, mode: Optional[str] = None) -> tuple[str, str
 
 
 async def _synthesize_turkish(text: str) -> Optional[bytes]:
-    base_url, _ = select_backend_url()
+    base_url, target_kind = select_backend_url()
     try:
         async with httpx.AsyncClient(timeout=45.0) as client:
             resp = await client.post(
                 f"{base_url}/v1/speech/synthesize",
-                headers=_auth_headers(),
+                headers=_auth_headers(target_kind),
                 json={"text": text[:1500]},
             )
             if resp.status_code == 200 and resp.content:
@@ -151,6 +208,8 @@ def main() -> None:
             "/mod derin — Derin / Gelişmiş Mod\n"
             "/mod oto — Otomatik mod yönlendirmesini aç/kapat\n"
             "/durum — Aktif sunucu (PC veya Bulut) ve mod bilgisi\n"
+            "/maildurum — Okul e-posta dinleyici durumu ve son hoca mailleri\n"
+            "/mailkontrol — Okul e-postasını hemen şimdi kontrol et\n"
             "/ses — Sesli Türkçe yanıtları aç/kapat\n"
             "Doğrudan Türkçe yazabilir veya ses kaydı gönderebilirsin."
         )
@@ -163,7 +222,7 @@ def main() -> None:
         base_url, kind = select_backend_url()
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
-                r = await client.get(f"{base_url}/v1/mamed/mode", headers=_auth_headers())
+                r = await client.get(f"{base_url}/v1/mamed/mode", headers=_auth_headers(kind))
                 r.raise_for_status()
                 info = r.json()
             durum_metni = (
@@ -181,16 +240,16 @@ def main() -> None:
         if chat is None or not _is_chat_allowed(chat.id):
             return
         arg = (context.args[0].lower() if context.args else "").strip()
-        base_url, _ = select_backend_url()
+        base_url, kind = select_backend_url()
         mapping = {"hizli": "fast", "hızlı": "fast", "basit": "fast", "dengeli": "standard", "standart": "standard", "derin": "deep", "gelismis": "deep", "gelişmiş": "deep"}
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 if arg == "oto":
-                    cur = (await client.get(f"{base_url}/v1/mamed/mode", headers=_auth_headers())).json()
+                    cur = (await client.get(f"{base_url}/v1/mamed/mode", headers=_auth_headers(kind))).json()
                     new_auto = not bool(cur.get("auto_route"))
                     res = await client.put(
                         f"{base_url}/v1/mamed/mode",
-                        headers=_auth_headers(),
+                        headers=_auth_headers(kind),
                         json={"auto_route": new_auto},
                     )
                     res.raise_for_status()
@@ -204,7 +263,7 @@ def main() -> None:
                     return
                 res = await client.put(
                     f"{base_url}/v1/mamed/mode",
-                    headers=_auth_headers(),
+                    headers=_auth_headers(kind),
                     json={"mode": target},
                 )
                 res.raise_for_status()
@@ -225,6 +284,53 @@ def main() -> None:
             f"Sesli Türkçe yanıtlar {'açıldı' if not cur else 'kapatıldı'}."
         )
 
+    async def cmd_maildurum(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = update.effective_chat
+        if chat is None or not _is_chat_allowed(chat.id):
+            return
+        base_url, kind = select_backend_url()
+        info = None
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(f"{base_url}/v1/mamed/school-mail/status", headers=_auth_headers(kind))
+                if r.status_code == 200:
+                    info = r.json()
+        except Exception:
+            info = None
+        if info is None:
+            from openjarvis.server.school_mail_watcher import get_school_mail_status
+
+            info = get_school_mail_status()
+        await update.message.reply_text(format_school_mail_status_text(info))
+
+    async def cmd_mailkontrol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat = update.effective_chat
+        if chat is None or not _is_chat_allowed(chat.id):
+            return
+        import asyncio
+
+        base_url, kind = select_backend_url()
+        try:
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                r = await client.post(f"{base_url}/v1/mamed/school-mail/check-now", headers=_auth_headers(kind))
+                if r.status_code == 200:
+                    await update.message.reply_text(format_school_mail_check_text(r.json()))
+                    return
+                if r.status_code in (400, 502):
+                    detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else r.text
+                    await update.message.reply_text(f"Okul mail kontrolü yapılamadı: {detail}")
+                    return
+        except Exception:
+            pass
+
+        try:
+            from openjarvis.server.school_mail_watcher import check_mailbox_once
+
+            result = await asyncio.to_thread(check_mailbox_once)
+            await update.message.reply_text(format_school_mail_check_text(result))
+        except Exception as exc:
+            await update.message.reply_text(f"Okul mail kontrolü başarısız: {exc}")
+
     async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
         if chat is None or not _is_chat_allowed(chat.id) or not update.message or not update.message.text:
@@ -244,7 +350,7 @@ def main() -> None:
         chat = update.effective_chat
         if chat is None or not _is_chat_allowed(chat.id) or not update.message or not update.message.voice:
             return
-        base_url, _ = select_backend_url()
+        base_url, kind = select_backend_url()
         try:
             tg_file = await context.bot.get_file(update.message.voice.file_id)
             buf = io.BytesIO()
@@ -253,7 +359,7 @@ def main() -> None:
             async with httpx.AsyncClient(timeout=45.0) as client:
                 tr = await client.post(
                     f"{base_url}/v1/speech/transcribe",
-                    headers=_auth_headers(),
+                    headers=_auth_headers(kind),
                     files={"file": ("voice.ogg", buf.getvalue(), "audio/ogg")},
                     data={"language": "tr", "hotwords": "Mamed, Mamed uyan"},
                 )
@@ -278,6 +384,8 @@ def main() -> None:
     app.add_handler(CommandHandler("durum", cmd_durum))
     app.add_handler(CommandHandler("mod", cmd_mod))
     app.add_handler(CommandHandler("ses", cmd_ses))
+    app.add_handler(CommandHandler("maildurum", cmd_maildurum))
+    app.add_handler(CommandHandler("mailkontrol", cmd_mailkontrol))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 

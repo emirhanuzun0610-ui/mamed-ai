@@ -296,6 +296,7 @@ DEFAULT_TOOL_CAPABILITIES: Dict[str, List[str]] = {
     "retrieval": [Capability.MEMORY_READ],
     "scan_chunks": [Capability.MEMORY_READ],
     "schedule_task": [Capability.SCHEDULE_CREATE],
+    "school_mail_recent": [Capability.FILE_READ],
     "shell_exec": [Capability.CODE_EXECUTE],
     "skill_manage": [Capability.FILE_READ, Capability.FILE_WRITE],
     "text_to_speech": [Capability.NETWORK_FETCH, Capability.FILE_WRITE],
